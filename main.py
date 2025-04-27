@@ -208,14 +208,26 @@ def start_tracking():
                 center_x = frame.shape[1] // 2
                 center_y = frame.shape[0] // 2
 
+                # --- Vertical Movement (Up/Down)
                 if gaze_y < 0.4:
                     cv2.arrowedLine(frame, (center_x, center_y + 50), (center_x, center_y - 50), (0, 255, 0), 5, tipLength=0.5)
                     cv2.putText(frame, 'Looking Up', (center_x - 70, center_y + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 elif gaze_y > 0.65:
                     cv2.arrowedLine(frame, (center_x, center_y - 50), (center_x, center_y + 50), (0, 0, 255), 5, tipLength=0.5)
                     cv2.putText(frame, 'Looking Down', (center_x - 90, center_y + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                else:
+
+                # --- Horizontal Movement (Left/Right)
+                if gaze_x < 0.4:
+                    cv2.arrowedLine(frame, (center_x + 50, center_y), (center_x - 50, center_y), (255, 0, 0), 5, tipLength=0.5)
+                    cv2.putText(frame, 'Looking Left', (center_x - 90, center_y + 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                elif gaze_x > 0.6:
+                    cv2.arrowedLine(frame, (center_x - 50, center_y), (center_x + 50, center_y), (255, 0, 0), 5, tipLength=0.5)
+                    cv2.putText(frame, 'Looking Right', (center_x - 90, center_y + 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+
+                # --- Center (Neutral)
+                if 0.4 <= gaze_x <= 0.6 and 0.4 <= gaze_y <= 0.65:
                     cv2.putText(frame, 'Center', (center_x - 40, center_y + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
 
         cv2.imshow("Eye Tracker", frame)
 
