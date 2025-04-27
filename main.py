@@ -1,3 +1,6 @@
+#Eye Tracker - Syed Umer Ahmad - TAMUQ
+
+
 import cv2
 import mediapipe as mp
 import pyautogui
