@@ -1,4 +1,5 @@
-# Advanced Eye Tracker - Syed Umer Ahmad - TAMUQ
+#Eye Tracker - Syed Umer Ahmad - TAMUQ
+
 
 import cv2
 import mediapipe as mp
@@ -26,20 +27,60 @@ resolution_list = []
 
 # Calibration
 calibration_data = {
-    "top_left": [],
-    "top_right": [],
-    "bottom_left": [],
-    "bottom_right": [],
-    "center": []
+    "top_left": None,
+    "top_right": None,
+    "bottom_left": None,
+    "bottom_right": None,
+    "center": None
 }
-calibrated_map = {}
-calibration_order = list(calibration_data.keys())
-calibration_index = 0
 calibration_done = False
+calibration_index = 0
+calibration_order = ["top_left", "top_right", "bottom_left", "bottom_right", "center"]
+
+def piecewise_interpolate(gaze_x, gaze_y):
+    """
+    Gaze_x and Gaze_y are between 0 and 1.
+    We interpolate based on the 5 calibration points.
+    """
+    if not calibration_done:
+        return interpolate(gaze_x, 0, 1, 0, screen_w), interpolate(gaze_y, 0, 1, 0, screen_h)
+
+    # Extract calibration screen positions
+    tl = calibration_data['top_left']
+    tr = calibration_data['top_right']
+    bl = calibration_data['bottom_left']
+    br = calibration_data['bottom_right']
+    center = calibration_data['center']
+
+    # Determine which quadrant we are closer to
+    if gaze_x <= 0.5 and gaze_y <= 0.5:
+        # Top Left Quadrant
+        screen_x = interpolate(gaze_x, 0, 0.5, tl[0], center[0])
+        screen_y = interpolate(gaze_y, 0, 0.5, tl[1], center[1])
+    elif gaze_x > 0.5 and gaze_y <= 0.5:
+        # Top Right Quadrant
+        screen_x = interpolate(gaze_x, 0.5, 1, center[0], tr[0])
+        screen_y = interpolate(gaze_y, 0, 0.5, tr[1], center[1])
+    elif gaze_x <= 0.5 and gaze_y > 0.5:
+        # Bottom Left Quadrant
+        screen_x = interpolate(gaze_x, 0, 0.5, bl[0], center[0])
+        screen_y = interpolate(gaze_y, 0.5, 1, center[1], bl[1])
+    else:
+        # Bottom Right Quadrant
+        screen_x = interpolate(gaze_x, 0.5, 1, center[0], br[0])
+        screen_y = interpolate(gaze_y, 0.5, 1, center[1], br[1])
+
+    return screen_x, screen_y
+
+
+# Gaze Smoothing
+smoothed_gaze_x = None
+smoothed_gaze_y = None
+ema_alpha = 0.2  # Smoothing factor (0.1-0.3 good)
 
 # Smoothing
-alpha_x = 0.1
-alpha_y = 0.1
+smooth_factor = 0.08
+y_smoothing_factor = 0.08
 
 # Landmark indices
 LEFT_EYE_LEFT = 33
@@ -54,69 +95,46 @@ RIGHT_EYE_BOTTOM = 374
 RIGHT_PUPIL = 473
 NOSE_BRIDGE = 168
 
-# Reaction Time
+# Reaction Time and Range Tracking
 reaction_times = []
 last_gaze_time = None
 last_gaze_x, last_gaze_y = None, None
+
 movement_min_x = float('inf')
 movement_max_x = float('-inf')
 movement_min_y = float('inf')
 movement_max_y = float('-inf')
 
 # ======== FUNCTIONS ========
-def collect_calibration_point(gaze_x, gaze_y):
-    global calibration_index, calibration_done
-    if calibration_index < len(calibration_order):
-        key = calibration_order[calibration_index]
-        calibration_data[key].append((gaze_x, gaze_y))
-        if len(calibration_data[key]) >= 20:
-            calibration_index += 1
-        if calibration_index >= len(calibration_order):
-            finalize_calibration()
 
-def finalize_calibration():
-    global calibrated_map, calibration_done
-    for key, samples in calibration_data.items():
-        avg_x = np.mean([x for x, _ in samples])
-        avg_y = np.mean([y for _, y in samples])
-        calibrated_map[key] = (avg_x, avg_y)
-    calibration_done = True
-    print("[Calibration] Completed.")
+def get_gaze_ratios(landmarks, w, h):
+    # Eye Openness
+    l_open = abs(landmarks[LEFT_EYE_TOP].y - landmarks[LEFT_EYE_BOTTOM].y) * h
+    r_open = abs(landmarks[RIGHT_EYE_TOP].y - landmarks[RIGHT_EYE_BOTTOM].y) * h
+    avg_open = (l_open + r_open) / 2
 
-def map_calibrated_gaze(gaze_x, gaze_y):
-    cx, cy = calibrated_map["center"]
-    dx = gaze_x - cx
-    dy = gaze_y - cy
-    if dx < 0 and dy < 0:
-        return "top_left"
-    elif dx > 0 and dy < 0:
-        return "top_right"
-    elif dx < 0 and dy > 0:
-        return "bottom_left"
-    elif dx > 0 and dy > 0:
-        return "bottom_right"
-    else:
-        return "center"
+    # Safer range
+    safe_min_open = 16   # Eyes partially closed
+    safe_max_open = 22   # Eyes fully open
 
-def get_pupil_relative_y(landmarks, eye_top, eye_bottom, pupil_idx, h):
-    top_y = landmarks[eye_top].y * h
-    bottom_y = landmarks[eye_bottom].y * h
-    pupil_y = landmarks[pupil_idx].y * h
-    return (pupil_y - top_y) / (bottom_y - top_y + 1e-6)
+    # Normalize
+    openness_normalized = (avg_open - safe_min_open) / (safe_max_open - safe_min_open + 1e-6)
+    openness_normalized = np.clip(openness_normalized, 0, 1)
 
-def get_gaze_ratios_enhanced(landmarks, w, h):
+    # Invert logic
+    gaze_y = 1 - openness_normalized
+
+    # Horizontal Gaze
     nose_x = int(landmarks[NOSE_BRIDGE].x * w)
     lp_x = int(landmarks[LEFT_PUPIL].x * w)
     rp_x = int(landmarks[RIGHT_PUPIL].x * w)
     eye_center_x = (lp_x + rp_x) / 2
     lx = int(landmarks[LEFT_EYE_LEFT].x * w)
     rx = int(landmarks[LEFT_EYE_RIGHT].x * w)
+
     gaze_x = (eye_center_x - nose_x) / (rx - lx + 1e-6)
     gaze_x = np.clip(0.5 + gaze_x, 0, 1)
-    l_rel_y = get_pupil_relative_y(landmarks, LEFT_EYE_TOP, LEFT_EYE_BOTTOM, LEFT_PUPIL, h)
-    r_rel_y = get_pupil_relative_y(landmarks, RIGHT_EYE_TOP, RIGHT_EYE_BOTTOM, RIGHT_PUPIL, h)
-    gaze_y = (l_rel_y + r_rel_y) / 2
-    gaze_y = np.clip(gaze_y, 0, 1)
+
     return gaze_x, gaze_y
 
 def interpolate(val, min_val, max_val, screen_min, screen_max):
@@ -126,6 +144,7 @@ def start_tracking():
     global cap, running, saving, last_gaze_time, last_gaze_x, last_gaze_y
     global movement_min_x, movement_max_x, movement_min_y, movement_max_y, reaction_times
 
+    # Reset tracking variables
     last_gaze_time = None
     last_gaze_x, last_gaze_y = None, None
     movement_min_x = float('inf')
@@ -145,6 +164,7 @@ def start_tracking():
     last_time = time.time()
     local_fps = []
     local_performance = []
+
     prev_x, prev_y = 0, 0
 
     running = True
@@ -166,18 +186,63 @@ def start_tracking():
 
         if results.multi_face_landmarks:
             for face_landmarks in results.multi_face_landmarks:
-                gaze_x, gaze_y = get_gaze_ratios_enhanced(face_landmarks.landmark, frame_w, frame_h)
+                # Correct Mesh Indices
+                LEFT_EYE_MESH = [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7]
+                RIGHT_EYE_MESH = [263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390, 249]
 
-                if not calibration_done:
-                    collect_calibration_point(gaze_x, gaze_y)
+                def get_eye_mask(frame_shape, landmarks, indices, frame_w, frame_h):
+                    eye_points = np.array([
+                        (int(landmarks[i].x * frame_w), int(landmarks[i].y * frame_h)) for i in indices
+                    ], np.int32)
+
+                    mask = np.zeros((frame_shape[0], frame_shape[1]), dtype=np.uint8)
+                    cv2.fillPoly(mask, [eye_points], 255)
+                    return mask, eye_points
+
+                # Generate precise eyelid masks
+                left_mask, left_poly = get_eye_mask(frame.shape, face_landmarks.landmark, LEFT_EYE_MESH, frame_w, frame_h)
+                right_mask, right_poly = get_eye_mask(frame.shape, face_landmarks.landmark, RIGHT_EYE_MESH, frame_w, frame_h)
+
+                # Draw Eyelid Mesh Outlines
+                cv2.polylines(frame, [left_poly], isClosed=True, color=(0, 255, 0), thickness=1)
+                cv2.polylines(frame, [right_poly], isClosed=True, color=(0, 255, 0), thickness=1)
+
+                # Optional: Mask and Crop (for precision use)
+                left_eye_exact = cv2.bitwise_and(rgb_frame, rgb_frame, mask=left_mask)
+                right_eye_exact = cv2.bitwise_and(rgb_frame, rgb_frame, mask=right_mask)
+
+                # Cropping exact region (optional for later use)
+                lx, ly, lw, lh = cv2.boundingRect(left_poly)
+                rx, ry, rw, rh = cv2.boundingRect(right_poly)
+
+                left_eye_crop = left_eye_exact[ly:ly+lh, lx:lx+lw]
+                right_eye_crop = right_eye_exact[ry:ry+rh, rx:rx+rw]
+
+                # Display for verification (optional)
+                cv2.imshow("Exact Left Eye", left_eye_crop)
+                cv2.imshow("Exact Right Eye", right_eye_crop)
+
+
+                # Gaze Processing
+                gaze_x, gaze_y = get_gaze_ratios(face_landmarks.landmark, frame_w, frame_h)
+
+                # Smoothing Gaze
+                global smoothed_gaze_x, smoothed_gaze_y
+
+                if smoothed_gaze_x is None:
+                    smoothed_gaze_x = gaze_x
+                    smoothed_gaze_y = gaze_y
                 else:
-                    zone = map_calibrated_gaze(gaze_x, gaze_y)
-                    cv2.putText(frame, f"{zone}", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    smoothed_gaze_x = (1 - ema_alpha) * smoothed_gaze_x + ema_alpha * gaze_x
+                    smoothed_gaze_y = (1 - ema_alpha) * smoothed_gaze_y + ema_alpha * gaze_y
 
+
+                # Reaction Time Tracking
+                gaze_change_threshold = 0.05
                 if last_gaze_x is not None and last_gaze_y is not None:
                     dx = abs(gaze_x - last_gaze_x)
                     dy = abs(gaze_y - last_gaze_y)
-                    if dx > 0.05 or dy > 0.05:
+                    if dx > gaze_change_threshold or dy > gaze_change_threshold:
                         if last_gaze_time is not None:
                             reaction_times.append(current_time - last_gaze_time)
                         last_gaze_time = current_time
@@ -186,11 +251,17 @@ def start_tracking():
 
                 last_gaze_x, last_gaze_y = gaze_x, gaze_y
 
-                target_x = interpolate(gaze_x, 0, 1, 0, screen_w)
-                target_y = interpolate(gaze_y, 0, 1, 0, screen_h)
+                # Cursor Move
+                target_x, target_y = piecewise_interpolate(smoothed_gaze_x, smoothed_gaze_y)
 
-                curr_x = alpha_x * target_x + (1 - alpha_x) * prev_x
-                curr_y = alpha_y * target_y + (1 - alpha_y) * prev_y
+
+
+                curr_x = prev_x + (target_x - prev_x) * smooth_factor
+                curr_y = prev_y + (target_y - prev_y) * y_smoothing_factor
+
+                curr_x = np.clip(curr_x, 0, screen_w - 1)
+                curr_y = np.clip(curr_y, 0, screen_h - 1)
+
                 pyautogui.moveTo(int(curr_x), int(curr_y))
 
                 movement_min_x = min(movement_min_x, curr_x)
@@ -198,14 +269,42 @@ def start_tracking():
                 movement_min_y = min(movement_min_y, curr_y)
                 movement_max_y = max(movement_max_y, curr_y)
 
+                # Performance Calculation
                 movement_scale = np.sqrt((curr_x - prev_x) ** 2 + (curr_y - prev_y) ** 2)
                 performance_score = fps / (1 + movement_scale)
 
                 local_fps.append(fps)
                 local_performance.append(performance_score)
+
                 prev_x, prev_y = curr_x, curr_y
 
+                # Arrow Drawing
+                center_x = frame.shape[1] // 2
+                center_y = frame.shape[0] // 2
+
+                # --- Vertical Movement (Up/Down)
+                if gaze_y < 0.4:
+                    cv2.arrowedLine(frame, (center_x, center_y + 50), (center_x, center_y - 50), (0, 255, 0), 5, tipLength=0.5)
+                    cv2.putText(frame, 'Looking Up', (center_x - 70, center_y + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                elif gaze_y > 0.65:
+                    cv2.arrowedLine(frame, (center_x, center_y - 50), (center_x, center_y + 50), (0, 0, 255), 5, tipLength=0.5)
+                    cv2.putText(frame, 'Looking Down', (center_x - 90, center_y + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+                # --- Horizontal Movement (Left/Right)
+                if gaze_x < 0.45:
+                    cv2.arrowedLine(frame, (center_x + 50, center_y), (center_x - 50, center_y), (255, 0, 0), 5, tipLength=0.5)
+                    cv2.putText(frame, 'Looking Left', (center_x - 90, center_y + 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                elif gaze_x > 0.65:
+                    cv2.arrowedLine(frame, (center_x - 50, center_y), (center_x + 50, center_y), (255, 0, 0), 5, tipLength=0.5)
+                    cv2.putText(frame, 'Looking Right', (center_x - 90, center_y + 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+
+                # --- Center (Neutral)
+                if 0.4 <= gaze_x <= 0.65 and 0.4 <= gaze_y <= 0.65:
+                    cv2.putText(frame, 'Center', (center_x - 40, center_y + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+
         cv2.imshow("Eye Tracker", frame)
+
         key = cv2.waitKey(1)
         if key == ord('k'):
             running = False
@@ -246,9 +345,13 @@ def plot_results():
     reaction_values = [p['avg_reaction_time'] for p in performance_list]
     horiz_range_values = [p['horizontal_range'] for p in performance_list]
     vert_range_values = [p['vertical_range'] for p in performance_list]
+
+    # Labels for x-axis = resolution + fps
     labels = resolution_list
 
     plt.figure(figsize=(16, 10))
+
+    # Plot 1: FPS vs Classic Performance
     plt.subplot(2, 2, 1)
     plt.scatter(fps_values, perf_values, color='blue')
     plt.xlabel("Average FPS")
@@ -256,6 +359,7 @@ def plot_results():
     plt.title("Performance vs FPS")
     plt.grid(True)
 
+    # Plot 2: Reaction Time
     plt.subplot(2, 2, 2)
     plt.plot(labels, reaction_values, marker='o', color='red')
     plt.xlabel("Resolution + FPS")
@@ -264,18 +368,20 @@ def plot_results():
     plt.xticks(rotation=45)
     plt.grid(True)
 
+    # Plot 3: Horizontal Range
     plt.subplot(2, 2, 3)
     plt.plot(labels, horiz_range_values, marker='x', color='green')
     plt.xlabel("Resolution + FPS")
-    plt.ylabel("Horizontal Movement Range (px)")
+    plt.ylabel("Horizontal Movement Range (pixels)")
     plt.title("Horizontal Control Range")
     plt.xticks(rotation=45)
     plt.grid(True)
 
+    # Plot 4: Vertical Range
     plt.subplot(2, 2, 4)
     plt.plot(labels, vert_range_values, marker='x', color='purple')
     plt.xlabel("Resolution + FPS")
-    plt.ylabel("Vertical Movement Range (px)")
+    plt.ylabel("Vertical Movement Range (pixels)")
     plt.title("Vertical Control Range")
     plt.xticks(rotation=45)
     plt.grid(True)
@@ -283,7 +389,8 @@ def plot_results():
     plt.tight_layout()
     plt.show()
 
-# ======== GUI ========
+
+# ======== TKINTER GUI ========
 root = tk.Tk()
 root.title("Gaze Tracker Performance Tester")
 root.geometry('450x300')
