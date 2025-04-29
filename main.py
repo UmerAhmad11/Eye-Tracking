@@ -37,6 +37,47 @@ calibration_done = False
 calibration_index = 0
 calibration_order = ["top_left", "top_right", "bottom_left", "bottom_right", "center"]
 
+def piecewise_interpolate(gaze_x, gaze_y):
+    """
+    Gaze_x and Gaze_y are between 0 and 1.
+    We interpolate based on the 5 calibration points.
+    """
+    if not calibration_done:
+        return interpolate(gaze_x, 0, 1, 0, screen_w), interpolate(gaze_y, 0, 1, 0, screen_h)
+
+    # Extract calibration screen positions
+    tl = calibration_data['top_left']
+    tr = calibration_data['top_right']
+    bl = calibration_data['bottom_left']
+    br = calibration_data['bottom_right']
+    center = calibration_data['center']
+
+    # Determine which quadrant we are closer to
+    if gaze_x <= 0.5 and gaze_y <= 0.5:
+        # Top Left Quadrant
+        screen_x = interpolate(gaze_x, 0, 0.5, tl[0], center[0])
+        screen_y = interpolate(gaze_y, 0, 0.5, tl[1], center[1])
+    elif gaze_x > 0.5 and gaze_y <= 0.5:
+        # Top Right Quadrant
+        screen_x = interpolate(gaze_x, 0.5, 1, center[0], tr[0])
+        screen_y = interpolate(gaze_y, 0, 0.5, tr[1], center[1])
+    elif gaze_x <= 0.5 and gaze_y > 0.5:
+        # Bottom Left Quadrant
+        screen_x = interpolate(gaze_x, 0, 0.5, bl[0], center[0])
+        screen_y = interpolate(gaze_y, 0.5, 1, center[1], bl[1])
+    else:
+        # Bottom Right Quadrant
+        screen_x = interpolate(gaze_x, 0.5, 1, center[0], br[0])
+        screen_y = interpolate(gaze_y, 0.5, 1, center[1], br[1])
+
+    return screen_x, screen_y
+
+
+# Gaze Smoothing
+smoothed_gaze_x = None
+smoothed_gaze_y = None
+ema_alpha = 0.2  # Smoothing factor (0.1-0.3 good)
+
 # Smoothing
 smooth_factor = 0.08
 y_smoothing_factor = 0.08
@@ -152,17 +193,40 @@ def start_tracking():
                 rp_y = int(face_landmarks.landmark[RIGHT_PUPIL].y * frame_h)
 
                 # Eye Box
-                x_min = max(min(lp_x, rp_x) - 50, 0)
-                x_max = min(max(lp_x, rp_x) + 50, frame_w)
-                y_min = max(min(lp_y, rp_y) - 50, 0)
-                y_max = min(max(lp_y, rp_y) + 50, frame_h)
+                # Left Eye ROI
+                left_eye_x = int(face_landmarks.landmark[LEFT_PUPIL].x * frame_w)
+                left_eye_y = int(face_landmarks.landmark[LEFT_PUPIL].y * frame_h)
+                lx1 = max(left_eye_x - 30, 0)
+                lx2 = min(left_eye_x + 30, frame_w)
+                ly1 = max(left_eye_y - 30, 0)
+                ly2 = min(left_eye_y + 30, frame_h)
+                left_eye_roi = rgb_frame[ly1:ly2, lx1:lx2]
+                cv2.rectangle(frame, (lx1, ly1), (lx2, ly2), (255, 100, 0), 2)
 
-                eye_roi = rgb_frame[y_min:y_max, x_min:x_max]
+                # Right Eye ROI
+                right_eye_x = int(face_landmarks.landmark[RIGHT_PUPIL].x * frame_w)
+                right_eye_y = int(face_landmarks.landmark[RIGHT_PUPIL].y * frame_h)
+                rx1 = max(right_eye_x - 30, 0)
+                rx2 = min(right_eye_x + 30, frame_w)
+                ry1 = max(right_eye_y - 30, 0)
+                ry2 = min(right_eye_y + 30, frame_h)
+                right_eye_roi = rgb_frame[ry1:ry2, rx1:rx2]
+                cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (0, 100, 255), 2)
 
-                cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
 
                 # Gaze Processing
                 gaze_x, gaze_y = get_gaze_ratios(face_landmarks.landmark, frame_w, frame_h)
+
+                # Smoothing Gaze
+                global smoothed_gaze_x, smoothed_gaze_y
+
+                if smoothed_gaze_x is None:
+                    smoothed_gaze_x = gaze_x
+                    smoothed_gaze_y = gaze_y
+                else:
+                    smoothed_gaze_x = (1 - ema_alpha) * smoothed_gaze_x + ema_alpha * gaze_x
+                    smoothed_gaze_y = (1 - ema_alpha) * smoothed_gaze_y + ema_alpha * gaze_y
+
 
                 # Reaction Time Tracking
                 gaze_change_threshold = 0.05
@@ -179,8 +243,9 @@ def start_tracking():
                 last_gaze_x, last_gaze_y = gaze_x, gaze_y
 
                 # Cursor Move
-                target_x = interpolate(gaze_x, 0, 1, 0, screen_w)
-                target_y = interpolate(gaze_y, 0, 1, 0, screen_h)
+                target_x, target_y = piecewise_interpolate(smoothed_gaze_x, smoothed_gaze_y)
+
+
 
                 curr_x = prev_x + (target_x - prev_x) * smooth_factor
                 curr_y = prev_y + (target_y - prev_y) * y_smoothing_factor
