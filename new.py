@@ -164,6 +164,7 @@ def start_tracking():
     last_time = time.time()
     local_fps = []
     local_performance = []
+    direction_log = [] 
 
     prev_x, prev_y = 0, 0
 
@@ -271,7 +272,8 @@ def start_tracking():
 
                 # Performance Calculation
                 movement_scale = np.sqrt((curr_x - prev_x) ** 2 + (curr_y - prev_y) ** 2)
-                performance_score = fps / (1 + movement_scale)
+                performance_score = min(100, (fps / (1 + movement_scale)) * 10)
+
 
                 local_fps.append(fps)
                 local_performance.append(performance_score)
@@ -286,17 +288,20 @@ def start_tracking():
                 if gaze_y < 0.4:
                     cv2.arrowedLine(frame, (center_x, center_y + 50), (center_x, center_y - 50), (0, 255, 0), 5, tipLength=0.5)
                     cv2.putText(frame, 'Looking Up', (center_x - 70, center_y + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    direction_log.append(("up", curr_y))
                 elif gaze_y > 0.65:
                     cv2.arrowedLine(frame, (center_x, center_y - 50), (center_x, center_y + 50), (0, 0, 255), 5, tipLength=0.5)
                     cv2.putText(frame, 'Looking Down', (center_x - 90, center_y + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
+                    direction_log.append(("down", curr_y))
                 # --- Horizontal Movement (Left/Right)
                 if gaze_x < 0.45:
                     cv2.arrowedLine(frame, (center_x + 50, center_y), (center_x - 50, center_y), (255, 0, 0), 5, tipLength=0.5)
                     cv2.putText(frame, 'Looking Left', (center_x - 90, center_y + 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                    direction_log.append(("left", curr_x))
                 elif gaze_x > 0.65:
                     cv2.arrowedLine(frame, (center_x - 50, center_y), (center_x + 50, center_y), (255, 0, 0), 5, tipLength=0.5)
                     cv2.putText(frame, 'Looking Right', (center_x - 90, center_y + 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                    direction_log.append(("right", curr_x))
 
                 # --- Center (Neutral)
                 if 0.4 <= gaze_x <= 0.65 and 0.4 <= gaze_y <= 0.65:
@@ -315,6 +320,29 @@ def start_tracking():
             saving = False
             break
 
+
+    # Analyze average position per direction
+    up_positions = [pos for dir, pos in direction_log if dir == "up"]
+    down_positions = [pos for dir, pos in direction_log if dir == "down"]
+    left_positions = [pos for dir, pos in direction_log if dir == "left"]
+    right_positions = [pos for dir, pos in direction_log if dir == "right"]
+
+    def compute_accuracy(positions, expected_area, axis_max):
+        if not positions:
+            return 0
+        score = np.mean([1 - abs(p - expected_area) / axis_max for p in positions])
+        return max(0, min(100, score * 100))
+
+    screen_h_half = screen_h / 2
+    screen_w_half = screen_w / 2
+
+    accuracy_up = compute_accuracy(up_positions, 0, screen_h)  # top
+    accuracy_down = compute_accuracy(down_positions, screen_h, screen_h)  # bottom
+    accuracy_left = compute_accuracy(left_positions, 0, screen_w)  # left
+    accuracy_right = compute_accuracy(right_positions, screen_w, screen_w)  # right
+
+    avg_accuracy = np.mean([accuracy_up, accuracy_down, accuracy_left, accuracy_right])
+
     if cap:
         cap.release()
     cv2.destroyAllWindows()
@@ -330,7 +358,7 @@ def start_tracking():
         resolution_list.append(f"{width}x{height} {fps_setting}fps")
         performance_list.append({
             'fps': avg_fps,
-            'performance': avg_performance,
+            'performance': avg_accuracy,
             'avg_reaction_time': avg_reaction_time,
             'horizontal_range': horizontal_range,
             'vertical_range': vertical_range
